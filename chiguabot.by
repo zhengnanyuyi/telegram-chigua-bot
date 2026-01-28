@@ -1,1 +1,136 @@
-吃瓜机器人
+# -*- coding: utf-8 -*-
+import os
+import asyncio
+import subprocess
+import requests
+import snscrape.modules.twitter as sntwitter
+
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, ContextTypes
+
+# ================== 配置 ==================
+BOT_TOKEN = "你的BOT_TOKEN"
+ADMIN_ID = 123456789          # 你的TG数字ID
+CHANNEL_ID = "@你的频道"
+
+KEYWORDS = ["搞笑", "离谱", "翻车", "drama", "wtf", "crazy"]
+SEARCH_QUERY = " OR ".join(KEYWORDS)
+
+FETCH_LIMIT = 10
+sent_ids = set()
+
+IMG_DIR = "media/images"
+VID_DIR = "media/videos"
+os.makedirs(IMG_DIR, exist_ok=True)
+os.makedirs(VID_DIR, exist_ok=True)
+
+# ================== 抓 X ==================
+def fetch_x_posts():
+    results = []
+    for tweet in sntwitter.TwitterSearchScraper(SEARCH_QUERY).get_items():
+        if len(results) >= FETCH_LIMIT:
+            break
+
+        if tweet.id in sent_ids:
+            continue
+
+        if not tweet.media:
+            continue
+
+        images = []
+        video = None
+
+        for m in tweet.media:
+            if m.__class__.__name__ == "Photo":
+                img_path = f"{IMG_DIR}/{tweet.id}_{len(images)}.jpg"
+                r = requests.get(m.fullUrl, timeout=10)
+                with open(img_path, "wb") as f:
+                    f.write(r.content)
+                images.append(img_path)
+
+            elif m.__class__.__name__ == "Video":
+                video_path = f"{VID_DIR}/{tweet.id}.mp4"
+                subprocess.run([
+                    "yt-dlp",
+                    "-f", "mp4",
+                    "-o", video_path,
+                    tweet.url
+                ])
+                video = video_path
+
+        results.append({
+            "id": tweet.id,
+            "text": tweet.content[:800],
+            "images": images,
+            "video": video
+        })
+        sent_ids.add(tweet.id)
+
+    return results
+
+# ================== 发送审核 ==================
+async def send_for_review(app):
+    while True:
+        posts = fetch_x_posts()
+
+        for p in posts:
+            caption = f"🐦 X 吃瓜\n\n{p['text']}"
+
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ 发布", callback_data="publish"),
+                    InlineKeyboardButton("❌ 丢弃", callback_data="discard")
+                ]
+            ])
+
+            if p["video"]:
+                await app.bot.send_video(
+                    ADMIN_ID,
+                    video=open(p["video"], "rb"),
+                    caption=caption,
+                    reply_markup=keyboard
+                )
+
+            elif p["images"]:
+                await app.bot.send_photo(
+                    ADMIN_ID,
+                    photo=open(p["images"][0], "rb"),
+                    caption=caption,
+                    reply_markup=keyboard
+                )
+
+        await asyncio.sleep(60)
+
+# ================== 审核按钮 ==================
+async def review_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+
+    if q.data == "publish":
+        if q.message.video:
+            await context.bot.send_video(
+                CHANNEL_ID,
+                q.message.video.file_id,
+                caption=q.message.caption
+            )
+        elif q.message.photo:
+            await context.bot.send_photo(
+                CHANNEL_ID,
+                q.message.photo[-1].file_id,
+                caption=q.message.caption
+            )
+        await q.edit_message_text("✅ 已发布")
+
+    else:
+        await q.edit_message_text("❌ 已丢弃")
+
+# ================== 启动 ==================
+if __name__ == "__main__":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CallbackQueryHandler(review_handler))
+
+    print("🤖 X 吃瓜 Bot 启动")
+    loop = asyncio.get_event_loop()
+    loop.create_task(send_for_review(app))
+
+    app.run_polling()
